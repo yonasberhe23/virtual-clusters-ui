@@ -178,6 +178,64 @@ export function deleteResource(prefix: string, resourceType: string, id: string)
   });
 }
 
+/** Mirrors pkg/virtual-clusters/utils/k3kInstalled.js. */
+export const K3K_CHART_NAME = 'suse-virtual-cluster-engine';
+export const K3K_REPO_NAME = 'suse-virtual-cluster-engine';
+export const K3K_NAMESPACE = 'k3k-system';
+
+/**
+ * True once anything occupies k3k-system. The extension gates its install UI on this
+ * count rather than on a named release, because a manually installed controller can
+ * carry any release name.
+ */
+export function k3kIsInstalled(clusterId: string): Cypress.Chainable<boolean> {
+  return apiRequest({
+    url:              `/k8s/clusters/${ clusterId }/v1/counts/count`,
+    failOnStatusCode: false,
+  }).then((resp) => {
+    return !!resp.body?.counts?.['catalog.cattle.io.app']?.namespaces?.[K3K_NAMESPACE]?.count;
+  });
+}
+
+export function waitForK3kInstalled(clusterId: string, retries = 120): Cypress.Chainable<boolean> {
+  const check = (remaining: number): Cypress.Chainable<boolean> => {
+    return k3kIsInstalled(clusterId).then((installed) => {
+      if (installed) {
+        return cy.wrap(true, { log: false });
+      }
+      if (remaining <= 1) {
+        return cy.wrap(false, { log: false });
+      }
+      cy.wait(2000); // eslint-disable-line cypress/no-unnecessary-waiting
+
+      return check(remaining - 1);
+    });
+  };
+
+  return check(retries);
+}
+
+/** The ClusterRepo the install flow creates on the host cluster to source the chart. */
+export function k3kChartRepo(clusterId: string): Cypress.Chainable<Cypress.Response<any>> {
+  return apiRequest({
+    url:              `/k8s/clusters/${ clusterId }/v1/catalog.cattle.io.clusterrepos/${ K3K_REPO_NAME }`,
+    failOnStatusCode: false,
+  });
+}
+
+/**
+ * Best effort, like deleteResource. The namespace goes last because deleting it first
+ * would strand the app's release secret and leave the count non-zero.
+ */
+export function uninstallK3k(clusterId: string) {
+  const prefix = `k8s/clusters/${ clusterId }/v1`;
+
+  deleteResource(prefix, `catalog.cattle.io.apps/${ K3K_NAMESPACE }`, K3K_CHART_NAME);
+  deleteResource(prefix, 'catalog.cattle.io.clusterrepos', K3K_REPO_NAME);
+
+  return deleteResource(prefix, 'namespaces', K3K_NAMESPACE);
+}
+
 export interface AwsHostClusterParams {
   name: string;
   namespace: string;
@@ -261,7 +319,6 @@ export function createAwsHostCluster(params: AwsHostClusterParams) {
                   cni:                   'calico',
                   'disable-kube-proxy':  false,
                   'etcd-expose-metrics': false,
-                  'ingress-controller':  'ingress-nginx',
                 },
                 machineSelectorConfig: [{ config: { 'protect-kernel-defaults': false } }],
                 etcd:                  {
